@@ -1,2 +1,6 @@
-App de interface Do ESP 32 De teste de rede Modbus RTU RS485 Comunicando Via Bluetooth com O ESP 32<img width="1080" height="2315" alt="image" src="https://github.com/user-attachments/assets/32dd6c93-3efc-4b0a-b0fe-234c163bad5a" />
+App de interface Do ESP 32 De teste de rede Modbus RTU RS485 Comunicando Via Bluetooth com O ESP 32
+Pasta "Codigo_para_o_ESP32_VS_Code" contem o codigo que deve ir no ESP 32 DevKit + Placa TTL 485
+<img width="1080" height="2315" alt="image" src="https://github.com/user-attachments/assets/32dd6c93-3efc-4b0a-b0fe-234c163bad5a" />
+<img width="1703" height="2272" alt="image" src="https://github.com/user-attachments/assets/d21dc9b4-36da-4019-ac86-069b5178ed26" />
+
 
