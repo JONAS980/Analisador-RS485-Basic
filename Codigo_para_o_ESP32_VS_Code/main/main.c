@@ -1,6 +1,57 @@
-/*
- * Analisador RS485 - Modbus RTU (Módulo Injetor Escravo)
- * Comunicação de Parametrização via Bluetooth SPP
+/* ====================================================================================================
+ * PROJETO: Analisador RS485 - Modbus RTU (Módulo Injetor Escravo)
+ * AUTOR: Jonas C. Rocha
+ * DATA V1.0.0: 05/04/2026
+ * DESCRIÇÃO: Firmware para ESP32 de injeção de pacotes Modbus em redes RS485.
+ * Possui comunicação de parametrização "a quente" via Bluetooth SPP,
+ * permitindo alterar Baud Rate, Paridade, Stop Bits e Carga Útil via Android.
+ * 
+ * === ARQUITETURA:===
+ * - FreeRTOS: Separa a comunicação Bluetooth da injeção física RS485 em Tarefas independentes.
+ * - Thread-Safety: Uso de Mutex (Shadow Copy) garantindo que o módulo nunca trave ao receber dados.
+ * - Hot-Swap UART: Reconfiguração dos parâmetros da porta Serial em tempo real sem reiniciar o chip.
+ * - Controle Half-Duplex: Chaveamento ultra-rápido do pino DE/RE do MAX485 usando atrasos de ROM.
+ * ====================================================================================================
+ 
+ * =====================================================================================================
+ * =====GUIA DE PERSONALIZAÇÃO RÁPIDA (Onde alterar as configurações principais):=======================
+ * =====================================================================================================
+ 
+ * -----------------------------------------------------------------------------------------------------
+ * * 1. NOME DO BLUETOOTH (O que aparece no celular):
+ * -> Vá até a seção "Configurações e Regras do Bluetooth" e altere a linha:
+ * static const char local_device_name[] = "ANALISADOR_RS485"; 
+ * (eX.: Substitua o CONFIG_EXAMPLE_LOCAL_DEVICE_NAME padrão pelo texto entre aspas acima).
+ * -----------------------------------------------------------------------------------------------------
+ 
+ * -----------------------------------------------------------------------------------------------------
+ * * 2. SENHA DO BLUETOOTH (PIN FIXO):
+ * -> O código está configurado para Exigir uma senha, caso queira deixar sem senha:
+ * -> Vá até a função app_main() e mude as linhas do PIN na secção // --- Configuração de Pareamento Seguro (PIN Fixo) ---:
+ * para o codigo de exemplo abaixo:
+ 
+ * // Configuração de Pareamento Simplificado (Just Works)
+    esp_bt_pin_type_t pin_type = ESP_BT_PIN_TYPE_VARIABLE;
+    esp_bt_pin_code_t pin_code;
+    memset(pin_code, 0, sizeof(esp_bt_pin_code_t)); // Zera a variável de senha para limpar lixo de memória
+    esp_bt_gap_set_pin(pin_type, 0, pin_code);      // Avisa que não existe um PIN de 4 números fixo digitável
+ * -----------------------------------------------------------------------------------------------------
+ 
+ * -----------------------------------------------------------------------------------------------------
+ * * 3. PINOS FÍSICOS DO HARDWARE (Placa ESP32):
+ * -> Vá até a seção "Definições e Pinos do Barramento RS485" e mude os valores:
+ * #define TXD_PIN  (GPIO_NUM_17) // Fio de transmissão de dados
+ * #define RXD_PIN  (GPIO_NUM_16) // Fio de recepção de dados
+ * #define DERE_PIN (GPIO_NUM_4)  // Fio de controle de direção (Módulo MAX485)
+ * ------------------------------------------------------------------------------------------------------
+ 
+ * ------------------------------------------------------------------------------------------------------
+ * * 4. CONFIGURAÇÃO PADRÃO DE PARTIDA (Se ligar a placa sem o celular conectar):
+ * -> Vá até a "Estrutura g_config" e mude a velocidade inicial e dados.
+ * O padrão atual liga em 115200 bps mandando o pacote de teste de onda quadrada (0x55).
+ * -------------------------------------------------------------------------------------------------------
+ 
+ * =======================================================================================================
  */
 
 
@@ -53,8 +104,8 @@
 #define SPP_TAG "SPP_ACCEPTOR_DEMO" 
 // Nome do serviço interno do Bluetooth (O Android procura por esse nome para abrir a porta serial)
 #define SPP_SERVER_NAME "SPP_SERVER" 
-// Nome público do aparelho (O nome que vai aparecer na tela do celular, ex: "ESP_SPP_ACCEPTOR")
-static const char local_device_name[] = CONFIG_EXAMPLE_LOCAL_DEVICE_NAME; 
+// Nome público do aparelho (O nome que vai aparecer na tela do celular, ex: "ANALISADOR_RS485")
+static const char local_device_name[] = "ANALISADOR_RS485"; 
 // Define que o Bluetooth vai rodar no modo "Callback" (reage a eventos como 'Conectou' ou 'Recebeu Dado')
 static const esp_spp_mode_t esp_spp_mode = ESP_SPP_MODE_CB; 
 // Ativa a retransmissão de pacotes perdidos (Garante que nenhum byte da sua string se perca pelo ar)
@@ -548,14 +599,28 @@ void app_main(void) {
     };
     ESP_ERROR_CHECK(esp_spp_enhanced_init(&bt_spp_cfg));
 
-    // Configuração de Pareamento Simplificado (Just Works)
-    esp_bt_pin_type_t pin_type = ESP_BT_PIN_TYPE_VARIABLE;
-    esp_bt_pin_code_t pin_code;
-    memset(pin_code, 0, sizeof(esp_bt_pin_code_t)); // Zera a variável de senha para limpar lixo de memória
-    esp_bt_gap_set_pin(pin_type, 0, pin_code);      // Avisa que não existe um PIN de 4 números fixo digitável
-
-    // --- 3. Inicializa Hardware RS485 ---
+    // --- Configuração de Pareamento Seguro (PIN Fixo) ---    
+    // Muda a regra do Bluetooth para exigir uma senha fixa e pré-definida
+    esp_bt_pin_type_t pin_type = ESP_BT_PIN_TYPE_FIXED;
     
+    // Cria a variável que vai guardar a nossa senha
+    esp_bt_pin_code_t pin_code;
+    
+    // Zera toda a memória da senha por segurança (evita lixo na memória)
+    memset(pin_code, 0, sizeof(esp_bt_pin_code_t)); 
+    
+    // Define os 4 dígitos do seu PIN 
+    // Nota: Como são caracteres, usamos aspas simples em cada número
+    pin_code[0] = '1';
+    pin_code[1] = '5';
+    pin_code[2] = '9';
+    pin_code[3] = '7';
+    
+    // Grava a senha no rádio Bluetooth e avisa que ela tem exatamente 4 dígitos de tamanho
+    esp_bt_gap_set_pin(pin_type, 4, pin_code);
+
+    
+    // --- 3. Inicializa Hardware RS485 ---
     // Cria a "Chave do Cofre" (Mutex). Precisa ser feito antes de qualquer coisa tentar ler/escrever configurações.
     g_config_mutex = xSemaphoreCreateMutex();
     
