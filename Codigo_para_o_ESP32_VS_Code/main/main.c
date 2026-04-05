@@ -3,64 +3,114 @@
  * Comunicação de Parametrização via Bluetooth SPP
  */
 
-#include <stdint.h>
-#include <string.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <inttypes.h>
-#include <stdlib.h>
-#include "nvs.h"
-#include "nvs_flash.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_log.h"
-#include "esp_bt.h"
-#include "esp_bt_main.h"
-#include "esp_gap_bt_api.h"
-#include "esp_bt_device.h"
-#include "esp_spp_api.h"
-#include "time.h"
-#include "sys/time.h"
 
-// --- Bibliotecas adicionais para o RS485 ---
-#include "driver/uart.h"
-#include "driver/gpio.h"
-#include "rom/ets_sys.h" // Para ets_delay_us
+//----------------------------------------------------------------------------//
+// --------------------- Inclusão das Bibliotecas -----------------------------//
+//----------------------------------------------------------------------------//
 
-// --- Definições do Bluetooth ---
-#define SPP_TAG "SPP_ACCEPTOR_DEMO"
-#define SPP_SERVER_NAME "SPP_SERVER"
-static const char local_device_name[] = CONFIG_EXAMPLE_LOCAL_DEVICE_NAME;
-static const esp_spp_mode_t esp_spp_mode = ESP_SPP_MODE_CB;
-static const bool esp_spp_enable_l2cap_ertm = true;
-static const esp_spp_sec_t sec_mask = ESP_SPP_SEC_AUTHENTICATE;
+// --- 1. Bibliotecas Padrão do C (Matemática, Memória e Textos) ---
+#include <stdint.h>   // Variáveis de tamanho exato (ex: uint8_t para o pacote Modbus)
+#include <string.h>   // Manipulação de strings e blocos de memória (memcpy)
+#include <stdbool.h>  // Suporte a valores booleanos (true/false)
+#include <stdio.h>    // Entrada e saída padrão (printf, sprintf)
+#include <inttypes.h> // Auxilia a imprimir variáveis exatas de forma segura no printf
+#include <stdlib.h>   // Utilitários gerais (alocação de memória e conversão texto->número)
+
+// --- 2. Memória Não Volátil (Obrigatória para o Bluetooth) ---
+#include "nvs.h"       // Acesso à memória interna (EEPROM/Flash) do ESP32
+#include "nvs_flash.h" // Salva chaves de pareamento para não pedir permissão toda vez
+
+// --- 3. Sistema Operacional (FreeRTOS) e Sincronização ---
+#include "freertos/FreeRTOS.h" // Biblioteca base do sistema operacional (multitarefas)
+#include "freertos/task.h"     // Permite rodar rotinas simultâneas (ex: Bluetooth e RS485 juntos)
+#include "freertos/semphr.h"   // Semáforos e Mutex: Impede que duas tarefas alterem a mesma variável ao mesmo tempo (Thread-safety)
+
+// --- 4. Logs e Mensagens do Sistema ---
+#include "esp_log.h" // Sistema profissional de mensagens de debug no terminal (ESP_LOGI)
+
+// --- 5. Pilha de Comunicação Bluetooth ---
+#include "esp_bt.h"         // Liga a antena e inicializa o controlador físico de rádio
+#include "esp_bt_main.h"    // Inicializa o "cérebro" lógico do Bluetooth (Bluedroid)
+#include "esp_gap_bt_api.h" // (GAP) Controla a vitrine: Nome do aparelho e visibilidade
+#include "esp_bt_device.h"  // Pega informações do hardware (ex: ler o Endereço MAC da placa)
+#include "esp_spp_api.h"    // (SPP) A mais importante: Simula o cabo serial recebendo os dados do Android
+
+// --- 6. Controle de Tempo ---
+#include "time.h"     // Funções padrão de tempo
+#include "sys/time.h" // Medição de tempo para gerenciar milissegundos
+
+// --- 7. Bibliotecas Adicionais Específicas para o RS485 (Hardware) ---
+#include "driver/uart.h" // Driver da porta Serial: Configura Baud rate, Paridade e Stop bits do barramento
+#include "driver/gpio.h" // Driver dos pinos: Usado para controlar o pino de direção (RE/DE) do módulo MAX485
+#include "rom/ets_sys.h" // Funções de baixo nível da ROM: Fornece o 'ets_delay_us' para pausas exatas de microssegundos (vital para o timing do Modbus)
+
+
+// ==============================================================================
+// --- Configurações e Regras do Bluetooth SPP (Serial Port Profile) ---
+// ==============================================================================
+
+// Tag usada pela função ESP_LOGI para identificar que a mensagem no terminal veio do Bluetooth
+#define SPP_TAG "SPP_ACCEPTOR_DEMO" 
+// Nome do serviço interno do Bluetooth (O Android procura por esse nome para abrir a porta serial)
+#define SPP_SERVER_NAME "SPP_SERVER" 
+// Nome público do aparelho (O nome que vai aparecer na tela do celular, ex: "ESP_SPP_ACCEPTOR")
+static const char local_device_name[] = CONFIG_EXAMPLE_LOCAL_DEVICE_NAME; 
+// Define que o Bluetooth vai rodar no modo "Callback" (reage a eventos como 'Conectou' ou 'Recebeu Dado')
+static const esp_spp_mode_t esp_spp_mode = ESP_SPP_MODE_CB; 
+// Ativa a retransmissão de pacotes perdidos (Garante que nenhum byte da sua string se perca pelo ar)
+static const bool esp_spp_enable_l2cap_ertm = true; 
+// Máscara de segurança: Exige que o celular faça a autenticação (pareamento) para poder conectar
+static const esp_spp_sec_t sec_mask = ESP_SPP_SEC_AUTHENTICATE; 
+// Define o papel do ESP32 na rede como "Escravo" (Ele fica parado ouvindo, esperando o celular "Mestre" se conectar a ele)
 static const esp_spp_role_t role_slave = ESP_SPP_ROLE_SLAVE;
 
-// --- Definições do RS485 ---
-#define UART_TESTE_NUM    (UART_NUM_2) 
-#define TXD_PIN           (GPIO_NUM_17) 
-#define RXD_PIN           (GPIO_NUM_16) 
-#define DERE_PIN          (GPIO_NUM_4)  // Pino de Controle Direção (DE/RE) 
-#define BUF_SIZE          (1024) 
-#define TASK_STACK_SIZE   (2048) 
-#define MAX_REPS          (32) // Buffer de mensagem tem 32 bytes 
 
+// ==============================================================================
+// --- Definições e Pinos do Barramento RS485 ---
+// ==============================================================================
+
+// Escolhe a porta Serial 2 do ESP32 (Evita conflitar com a Serial 0, que é usada pelo cabo USB para gravar/debug)
+#define UART_TESTE_NUM    (UART_NUM_2)
+// Pino TX (Transmissão): Onde o ESP32 envia os bits que vão entrar no pino DI (Driver Input) do módulo MAX485
+#define TXD_PIN           (GPIO_NUM_17)
+// Pino RX (Recepção): Onde o ESP32 lê os bits que chegam do pino RO (Receiver Output) do módulo MAX485
+#define RXD_PIN           (GPIO_NUM_16)
+// Pino de Controle de Direção (DE/RE): O pino mais importante do RS485 (Half-Duplex). Nível ALTO = Envia dados / Nível BAIXO = Escuta dados
+#define DERE_PIN          (GPIO_NUM_4)
+// Tamanho da memória temporária (Ring Buffer) da porta Serial. 1024 bytes é espaço de sobra para armazenar pacotes Modbus grandes
+#define BUF_SIZE          (1024)
+// Memória RAM (Stack) reservada no sistema operacional (FreeRTOS) para a rotina que vai rodar as operações do RS485 (2048 bytes = 2KB)
+#define TASK_STACK_SIZE   (2048)
+// Limite máximo de bytes da mensagem (ou quantidade de repetições) para o buffer de injeção de dados
+#define MAX_REPS          (32)
+// Atraso de hardware (50 microssegundos). Garante que o último pulso elétrico terminou de viajar pelo longo cabo antes de virar a chave DE/RE para o modo escuta
+#define RS485_TX_DELAY_US (50)
+// Tag usada pela função ESP_LOGI para identificar que a mensagem de diagnóstico no terminal do VS Code veio do módulo RS485
 static const char *RS_TAG = "RS485_TESTER";
 
-// --- Variáveis Globais de Configuração ---
-typedef struct {
-    int baud_rate;
-    uart_parity_t parity;
-    uart_stop_bits_t stop_bits;
-    int frame_delay_ms;
-    uint8_t base_byte; // O byte selecionado (ex: 0x55) 
-    int     repetitions; // Quantas vezes repetir 
-    uint8_t message[MAX_REPS]; // Buffer da mensagem final 
-    int     message_len; // Tamanho da mensagem final 
-} rs485_config_t;
 
-// Configuração inicializada com padrões 
-static volatile rs485_config_t g_config = {
+// ==============================================================================
+// --- Estrutura de Variáveis Globais (Configurações do Gerador RS485) ---
+// ==============================================================================
+
+// Cria um "pacote" (estrutura) que agrupa todos os parâmetros da injeção de dados. 
+// Isso mantém o código organizado e facilita atualizar tudo junto quando o celular manda um comando.
+typedef struct {
+    int baud_rate;               // Velocidade da rede em bits por segundo (ex: 9600, 19200, 115200)
+    uart_parity_t parity;        // Bit de verificação de erro do protocolo (None, Even/Par, Odd/Ímpar)
+    uart_stop_bits_t stop_bits;  // Quantidade de bits (1 ou 2) que sinalizam o fim de cada caractere na serial
+    int frame_delay_ms;          // Tempo de pausa/intervalo (em milissegundos) programado pelo app antes do envio
+    uint8_t base_byte;           // O byte exato (de 0 a 255 / 0x00 a 0xFF) formado pelas 8 chaves lá do aplicativo
+    int repetitions;             // Quantidade de vezes que o 'base_byte' será repetido e enviado na mesma rajada
+    uint8_t message[MAX_REPS];   // Memória (Array) que guarda a rajada de dados já montada antes de jogar no cabo
+    int message_len;             // O tamanho real (quantidade de bytes) que a mensagem final ocupou no buffer
+} rs485_config_t;                // Nome deste novo "tipo" de variável personalizada
+
+
+//----------------------------------------------------------------------------//
+// ------------------Configuração inicializada com padrões--------------------//
+//----------------------------------------------------------------------------//
+static rs485_config_t g_config = {
     .baud_rate = 115200,
     .parity = UART_PARITY_DISABLE,
     .stop_bits = UART_STOP_BITS_1,
@@ -71,29 +121,53 @@ static volatile rs485_config_t g_config = {
     .message_len = 5
 };
 
-static TaskHandle_t g_generator_task_handle = NULL; 
+static TaskHandle_t g_generator_task_handle = NULL;
+static SemaphoreHandle_t g_config_mutex = NULL;
 
-// ==============================================================================
-// FUNÇÕES DO RS485
-// ==============================================================================
+
+//****************************************************************************//
+// ------------------------FUNÇÕES DO RS485-----------------------------------//
+//****************************************************************************//
+
+// Atualiza o buffer da mensagem com base na configuração atual
+static void update_message_buffer() {
+    if (g_config.repetitions < 1) g_config.repetitions = 1;
+    if (g_config.repetitions > MAX_REPS) g_config.repetitions = MAX_REPS;
+
+    g_config.message_len = g_config.repetitions;
+    for (int i = 0; i < g_config.repetitions; i++) {
+        g_config.message[i] = g_config.base_byte;
+    }
+}
 
 // Tarefa Geradora (Envia o sinal RS485 continuamente)
 static void rs485_test_task(void *arg) {
     ESP_LOGI(RS_TAG, "Tarefa Geradora iniciada.");
-    while (1) { 
+    
+    // Variáveis locais para minimizar o tempo de bloqueio do mutex
+    uint8_t local_message[MAX_REPS];
+    int local_message_len;
+    int local_delay_ms;
+
+    while (1) {
+        // Copia a configuração de forma segura para variáveis locais
+        xSemaphoreTake(g_config_mutex, portMAX_DELAY);
+        memcpy(local_message, g_config.message, g_config.message_len);
+        local_message_len = g_config.message_len;
+        local_delay_ms = g_config.frame_delay_ms;
+        xSemaphoreGive(g_config_mutex);
+
         gpio_set_level(DERE_PIN, 1);
-        ets_delay_us(50);
-        // Escreve a mensagem final 
-        uart_write_bytes(UART_TESTE_NUM, (const char*)g_config.message, g_config.message_len); 
+        ets_delay_us(RS485_TX_DELAY_US);
+        uart_write_bytes(UART_TESTE_NUM, (const char*)local_message, local_message_len);
         uart_wait_tx_done(UART_TESTE_NUM, pdMS_TO_TICKS(100)); 
         gpio_set_level(DERE_PIN, 0);
-        vTaskDelay(pdMS_TO_TICKS(g_config.frame_delay_ms));
+        vTaskDelay(pdMS_TO_TICKS(local_delay_ms));
     }
 }
 
 // Reconfigura a UART dinamicamente
 void reconfigure_test_uart() {
-    ESP_LOGI(RS_TAG, "Reconfigurando UART2 para %d baud", g_config.baud_rate);
     if (g_generator_task_handle != NULL) vTaskSuspend(g_generator_task_handle); 
     
     uart_driver_delete(UART_TESTE_NUM);
@@ -105,6 +179,10 @@ void reconfigure_test_uart() {
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
+
+    // Log com a configuração que será aplicada
+    ESP_LOGI(RS_TAG, "Reconfigurando UART2 para %d baud, Parity: %d, Stop bits: %d", uart_config.baud_rate, uart_config.parity, uart_config.stop_bits);
+
     uart_driver_install(UART_TESTE_NUM, BUF_SIZE * 2, 0, 0, NULL, 0); 
     uart_param_config(UART_TESTE_NUM, &uart_config);
     uart_set_pin(UART_TESTE_NUM, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
@@ -135,9 +213,11 @@ static void init_gpio(void) {
     gpio_set_level(DERE_PIN, 0); 
 }
 
-// ==============================================================================
-// FUNÇÕES DO BLUETOOTH
-// ==============================================================================
+
+
+//****************************************************************************//
+//------------------------FUNÇÕES DO BLUETOOTH--------------------------------//
+//****************************************************************************//
 
 static char *bda2str(uint8_t * bda, char *str, size_t size) {
     if (bda == NULL || str == NULL || size < 18) return NULL;
@@ -162,7 +242,7 @@ static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
         }
         break;
     
-    // --- O CORAÇÃO DO PARSER: ONDE OS DADOS CHEGAM DO CELULAR ---
+    // --- ONDE OS DADOS CHEGAM DO CELULAR ---
     case ESP_SPP_DATA_IND_EVT:
         ESP_LOGI(SPP_TAG, "Recebido %d bytes", param->data_ind.len);
         
@@ -174,12 +254,16 @@ static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
         cmd[len] = '\0';
         
         bool needs_reconfig = false;
-        char *token = strtok(cmd, ":\n"); 
+        char *saveptr; // Para strtok_r
+
+        xSemaphoreTake(g_config_mutex, portMAX_DELAY);
+
+        char *token = strtok_r(cmd, ":\n", &saveptr); 
 
         while (token != NULL) { 
             char* key = token;
-            token = strtok(NULL, ":\n"); 
-            if (token == NULL) break;
+            token = strtok_r(NULL, ":\n", &saveptr); 
+            if (token == NULL) break; // Sai se não houver valor para a chave
             char* value = token;
 
             ESP_LOGI(SPP_TAG, "Comando BT: %s=%s", key, value);
@@ -204,26 +288,20 @@ static void esp_spp_cb(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
             }
             else if (strcmp(key, "REPS") == 0) { 
                 g_config.repetitions = atoi(value);
-                if (g_config.repetitions < 1) g_config.repetitions = 1; 
-                if (g_config.repetitions > MAX_REPS) g_config.repetitions = MAX_REPS; 
-                
-                g_config.message_len = g_config.repetitions;
-                for(int i=0; i < g_config.repetitions; i++) { 
-                    g_config.message[i] = g_config.base_byte; 
-                }
+                update_message_buffer();
             }
             else if (strcmp(key, "MSG_BIN") == 0) {
                 if (strlen(value) == 8) { 
                     g_config.base_byte = parse_binary_string(value);
-                    g_config.message_len = g_config.repetitions; 
-                    for(int i=0; i < g_config.repetitions; i++) { 
-                        g_config.message[i] = g_config.base_byte; 
-                    }
+                    update_message_buffer();
                 }
             }
-            token = strtok(NULL, ":\n");
+            token = strtok_r(NULL, ":\n", &saveptr);
         }
+
+        xSemaphoreGive(g_config_mutex);
         
+        // A reconfiguração é chamada fora da seção crítica do mutex
         if (needs_reconfig) {
             reconfigure_test_uart();
         }
@@ -249,9 +327,14 @@ void esp_bt_gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
     }
 }
 
-// ==============================================================================
-// MAIN
-// ==============================================================================
+
+
+
+
+//============================================================================//
+//-------------------------------MAIN-----------------------------------------//
+//============================================================================//
+
 void app_main(void) {
     // 1. Inicializa Memória NVS (Obrigatório para BT)
     esp_err_t ret = nvs_flash_init();
@@ -281,13 +364,17 @@ void app_main(void) {
 
     esp_bt_pin_type_t pin_type = ESP_BT_PIN_TYPE_VARIABLE;
     esp_bt_pin_code_t pin_code;
-    esp_bt_gap_set_pin(pin_type, 0, pin_code);
+    memset(pin_code, 0, sizeof(esp_bt_pin_code_t)); // Zera o código PIN para evitar lixo de memória
+    esp_bt_gap_set_pin(pin_type, 0, pin_code); // Define que não há um PIN fixo, permitindo pareamento "Just Works"
 
     // 3. Inicializa Hardware RS485
+    g_config_mutex = xSemaphoreCreateMutex();
     init_gpio();
-    for(int i=0; i < g_config.repetitions; i++) { 
-        g_config.message[i] = g_config.base_byte; 
-    }
+
+    xSemaphoreTake(g_config_mutex, portMAX_DELAY);
+    update_message_buffer(); // Monta a mensagem inicial
+    xSemaphoreGive(g_config_mutex);
+
     reconfigure_test_uart(); 
     
     // 4. Inicia a Tarefa Geradora
