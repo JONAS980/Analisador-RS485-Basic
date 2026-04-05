@@ -72,7 +72,7 @@ fun MainScreen() {
 
         if (allPermissionsGranted) {
             coroutineScope.launch(Dispatchers.IO) {
-                val success = BTManager.connect(context, "ESP_SPP_ACCEPTOR")
+                val success = BTManager.connect(context, "ANALISADOR_RS485")
                 isConnected = success
                 withContext(Dispatchers.Main) {
                     if (success) Toast.makeText(context, "Conectado!", Toast.LENGTH_SHORT).show()
