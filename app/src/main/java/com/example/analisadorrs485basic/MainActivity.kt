@@ -45,7 +45,11 @@ fun MainScreen() {
     val coroutineScope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
 
+    // --- VARIÁVEIS DE ESTADO DO BLUETOOTH ---
     var isConnected by remember { mutableStateOf(false) }
+    var pairedDevicesList by remember { mutableStateOf(listOf<String>()) }
+    var selectedDevice by remember { mutableStateOf("Selecione o ESP32...") }
+    var expandedDeviceMenu by remember { mutableStateOf(false) }
 
     // --- LÓGICA DE PERMISSÕES ---
     val permissionsToRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -65,19 +69,47 @@ fun MainScreen() {
         }
     }
 
+    fun carregarDispositivosPareados() {
+        try {
+            val bluetoothManager = context.getSystemService(android.content.Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager
+            val adapter = bluetoothManager.adapter
+            val dispositivos = adapter?.bondedDevices
+
+            if (dispositivos != null && dispositivos.isNotEmpty()) {
+                pairedDevicesList = dispositivos.map { it.name ?: "Dispositivo Desconhecido" }
+                if (selectedDevice == "Selecione o ESP32...") {
+                    selectedDevice = pairedDevicesList.first() // Seleciona o primeiro da lista por padrão
+                }
+            } else {
+                Toast.makeText(context, "Nenhum dispositivo pareado encontrado.", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: SecurityException) {
+            Toast.makeText(context, "Permissão de Bluetooth necessária para listar.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     fun checkPermissionsAndConnect() {
         val allPermissionsGranted = permissionsToRequest.all {
             ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
         }
 
         if (allPermissionsGranted) {
-            coroutineScope.launch(Dispatchers.IO) {
-                val success = BTManager.connect(context, "ANALISADOR_RS485")
-                isConnected = success
-                withContext(Dispatchers.Main) {
-                    if (success) Toast.makeText(context, "Conectado!", Toast.LENGTH_SHORT).show()
-                    else Toast.makeText(context, "Falha na conexão.", Toast.LENGTH_SHORT).show()
+            // Se já tem as permissões, primeiro carrega a lista para o menu (caso ainda não tenha carregado)
+            if (pairedDevicesList.isEmpty()) carregarDispositivosPareados()
+
+            // Só tenta conectar se o usuário não estiver na opção padrão
+            if (selectedDevice != "Selecione o ESP32...") {
+                coroutineScope.launch(Dispatchers.IO) {
+                    // Usa a variável em vez do nome fixo!
+                    val success = BTManager.connect(context, selectedDevice)
+                    isConnected = success
+                    withContext(Dispatchers.Main) {
+                        if (success) Toast.makeText(context, "Conectado a $selectedDevice!", Toast.LENGTH_SHORT).show()
+                        else Toast.makeText(context, "Falha na conexão com $selectedDevice.", Toast.LENGTH_SHORT).show()
+                    }
                 }
+            } else {
+                Toast.makeText(context, "Por favor, selecione um dispositivo na lista primeiro.", Toast.LENGTH_SHORT).show()
             }
         } else {
             permissionLauncher.launch(permissionsToRequest)
@@ -117,15 +149,62 @@ fun MainScreen() {
         )
         Spacer(modifier = Modifier.height(16.dp))
 
+        // --- MENU: SELECIONAR DISPOSITIVO BLUETOOTH ---
+        Row(
+            modifier = Modifier.fillMaxWidth(0.9f),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Dropdown de Dispositivos
+            ExposedDropdownMenuBox(
+                expanded = expandedDeviceMenu,
+                onExpandedChange = {
+                    expandedDeviceMenu = !expandedDeviceMenu
+                    if (expandedDeviceMenu && pairedDevicesList.isEmpty()) {
+                        // Tenta carregar os dispositivos ao abrir o menu
+                        carregarDispositivosPareados()
+                    }
+                },
+                modifier = Modifier.weight(1f).padding(end = 8.dp)
+            ) {
+                OutlinedTextField(
+                    value = selectedDevice,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Dispositivo Pareado") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedDeviceMenu) },
+                    modifier = Modifier.menuAnchor(type = MenuAnchorType.PrimaryNotEditable).fillMaxWidth()
+                )
+                ExposedDropdownMenu(
+                    expanded = expandedDeviceMenu,
+                    onDismissRequest = { expandedDeviceMenu = false }
+                ) {
+                    pairedDevicesList.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option) },
+                            onClick = { selectedDevice = option; expandedDeviceMenu = false }
+                        )
+                    }
+                }
+            }
+
+            // Botão de Atualizar a Lista (Recarregar)
+            IconButton(onClick = { carregarDispositivosPareados() }) {
+                Text("🔄", fontSize = 24.sp) // Pode trocar por um ícone do Material Design se preferir
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         // --- BOTÃO DE CONECTAR ---
         Button(
             onClick = { checkPermissionsAndConnect() },
-            modifier = Modifier.fillMaxWidth(0.9f),
+            modifier = Modifier.fillMaxWidth(0.9f).height(50.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = if (isConnected) Color(0xFF4CAF50) else Color.Gray
+                containerColor = if (isConnected) Color(0xFF4CAF50) else Color(0xFF2196F3)
             )
         ) {
-            Text(if (isConnected) "CONECTADO AO ESP32" else "CONECTAR AO ESP32")
+            Text(if (isConnected) "CONECTADO A $selectedDevice" else "CONECTAR")
         }
 
         Spacer(modifier = Modifier.height(16.dp))
